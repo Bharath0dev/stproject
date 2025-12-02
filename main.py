@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, status, Request
 from database import engine, Base
 import models   # ensure your models file imported so tables are registered
 import schemas
@@ -6,11 +6,24 @@ import bcrypt
 from fastapi import Depends, HTTPException
 from sqlalchemy.orm import Session
 from database import SessionLocal
-
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from datetime import datetime, timedelta
+import jwt
+from typing import List, Optional
+from datetime import datetime, timedelta, date
+from typing import Dict
+from uuid import UUID
 
 app = FastAPI()
 
 Base.metadata.create_all(bind=engine)
+
+# JWT Configuration
+SECRET_KEY = "your-secret-key"  
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+security = HTTPBearer()
 
 # Dependency
 def get_db():
@@ -34,6 +47,38 @@ def hash_password(plain_password: str) -> str:
     hashed = bcrypt.hashpw(plain_password.encode("utf-8"), salt)
     # hashed is bytes, convert to str
     return hashed.decode("utf-8")
+
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+) -> models.User:
+    """
+    Dependency to get the current authenticated user from JWT token
+    """
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token has expired")
+    except jwt.JWTError:
+        raise HTTPException(status_code=401, detail="Could not validate credentials")
+    
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if user is None:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
+
 
 @app.post("/register/", response_model=schemas.UserOut)
 def create_user(user_in: schemas.UserCreate, db: Session = Depends(get_db)):
@@ -71,4 +116,180 @@ def user_login(user_in: schemas.UserLogin, db: Session = Depends(get_db)):
     if not bcrypt.checkpw(plain_pw, hashed_pw):
         raise HTTPException(status_code=401, detail="Incorrect password")
 
-    return {"message": "Login successful", "user_id": str(user.id)}
+    # Create access token
+    access_token = create_access_token(data={"sub": str(user.id)})
+    
+    return {
+        "message": "Login successful",
+        "user_id": str(user.id),
+        "access_token": access_token,
+        "token_type": "bearer"
+    }
+
+
+@app.get("/userdata/{user_id}", response_model=schemas.UserOut)
+def user_data(user_id: UUID, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    return user
+
+# --- Category endpoints ---
+@app.post("/categories/", response_model=schemas.CategoryRead, status_code=status.HTTP_201_CREATED)
+def create_category(
+    cat: schemas.CategoryCreate,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user)
+):
+    new = models.PersonalCategory(name=cat.name, type=cat.type, user_id=user.id)
+    db.add(new)
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Category with same name & type already exists")
+    db.refresh(new)
+    return new
+
+
+@app.get("/categories/", response_model=List[schemas.CategoryRead])
+def get_categories(
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user)
+):
+    cats = db.query(models.PersonalCategory).filter(models.PersonalCategory.user_id == user.id).all()
+    return cats
+
+
+
+# --- Expense endpoints ---
+@app.post("/expenses/", response_model=schemas.ExpenseRead, status_code=status.HTTP_201_CREATED)
+def create_expense(
+    expense: schemas.ExpenseCreate,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user)
+):
+    # Verify category belongs to user if category_id is provided
+    if expense.category_id:
+        category = db.query(models.PersonalCategory).filter(
+            models.PersonalCategory.id == expense.category_id,
+            models.PersonalCategory.user_id == user.id
+        ).first()
+        if not category:
+            raise HTTPException(status_code=404, detail="Category not found or doesn't belong to you")
+    
+    new_expense = models.PersonalExpense(
+        user_id=user.id,
+        category_id=expense.category_id,
+        amount=expense.amount,
+        description=expense.description,
+        date=expense.date
+    )
+    db.add(new_expense)
+    db.commit()
+    db.refresh(new_expense)
+    return new_expense
+
+
+
+@app.get("/expenses/", response_model=List[schemas.ExpenseRead])
+def get_expenses(
+    category_id: Optional[int] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user)
+):
+    query = db.query(models.PersonalExpense).filter(models.PersonalExpense.user_id == user.id)
+    
+    # Apply filters if provided
+    if category_id:
+        query = query.filter(models.PersonalExpense.category_id == category_id)
+    if start_date:
+        query = query.filter(models.PersonalExpense.date >= start_date)
+    if end_date:
+        query = query.filter(models.PersonalExpense.date <= end_date)
+    
+    expenses = query.order_by(models.PersonalExpense.date.desc()).all()
+    return expenses
+
+
+@app.put("/expenses/{expense_id}", response_model=schemas.ExpenseRead)
+# CHANGE: Inject the Request object directly
+async def update_expense( # <-- Must be an async function to use request.json()
+    expense_id: int,
+    request: Request, # <-- Inject the raw request object
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user)
+):
+    # Retrieve the raw dictionary data asynchronously
+    try:
+        # Await the json() method of the Request object
+        update_data = await request.json() 
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    expense = db.query(models.PersonalExpense).filter(
+        models.PersonalExpense.id == expense_id,
+        models.PersonalExpense.user_id == user.id
+    ).first()
+    
+    if not expense:
+        raise HTTPException(status_code=404, detail="Expense not found")
+    
+    # --- MANUAL DATE & VALIDATION FIX (Keep this logic) ---
+    
+    # 1. Manual Date Parsing
+    if "date" in update_data and update_data["date"] is not None:
+        if not isinstance(update_data["date"], str):
+             raise HTTPException(status_code=400, detail="Date must be a string in YYYY-MM-DD format.")
+        
+        try:
+            date_str = update_data["date"]
+            # datetime.strptime returns a datetime object, use .date()
+            parsed_date = datetime.strptime(date_str, "%Y-%m-%d").date() 
+            update_data["date"] = parsed_date
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+    
+    # 2. Manual Amount Validation (Ensures Decimal conversion)
+    if "amount" in update_data and update_data["amount"] is not None:
+        try:
+            update_data["amount"] = Decimal(str(update_data["amount"]))
+        except Exception:
+            raise HTTPException(status_code=400, detail="Amount must be a valid number.")
+
+    # 3. Category Validation (Keep existing logic)
+    if "category_id" in update_data and update_data["category_id"] is not None:
+        category = db.query(models.PersonalCategory).filter(
+            models.PersonalCategory.id == update_data["category_id"],
+            models.PersonalCategory.user_id == user.id
+        ).first()
+        if not category:
+            raise HTTPException(status_code=404, detail="Category not found or doesn't belong to you")
+            
+    # Update the expense with provided fields
+    for field, value in update_data.items():
+        setattr(expense, field, value)
+    
+    db.commit()
+    db.refresh(expense)
+    return expense
+
+
+
+@app.delete("/expenses/{expense_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_expense(
+    expense_id: int,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user)
+):
+    expense = db.query(models.PersonalExpense).filter(
+        models.PersonalExpense.id == expense_id,
+        models.PersonalExpense.user_id == user.id
+    ).first()
+    
+    if not expense:
+        raise HTTPException(status_code=404, detail="Expense not found")
+    
+    db.delete(expense)
+    db.commit()
+    return None
