@@ -65,3 +65,29 @@ class ExpenseRead(BaseModel):
 
     class Config:
         from_attributes = True
+
+class CreateGroup(BaseModel):
+    name: str
+
+class GroupRead(BaseModel):
+    id: int
+    name: str
+    created_by: UUID
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        orm_mode = True
+
+class GroupMemberAdd(BaseModel):
+    user_id: UUID
+    is_admin: bool = False
+
+class GroupMemberRead(BaseModel):
+    id: int
+    group_id: UUID
+    user_id: UUID
+    joined_at: datetime
+    is_admin: bool
+    
+    model_config = ConfigDict(from_attributes=True)

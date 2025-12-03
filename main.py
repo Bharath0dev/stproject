@@ -293,3 +293,85 @@ def delete_expense(
     db.delete(expense)
     db.commit()
     return None
+
+@app.post("/groups/", response_model=schemas.GroupRead)
+def create_group(
+    group_in: schemas.CreateGroup, 
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user)  # Get from token
+):
+    group = models.Groups(
+        name=group_in.name,
+        created_by=user.id  # Use authenticated user's ID
+    )
+    db.add(group)
+    db.commit()
+    db.refresh(group)
+    
+    # Automatically add creator as admin member
+    creator_member = models.GroupMembers(
+        group_id=group.id,
+        user_id=user.id,
+        is_admin=True
+    )
+    db.add(creator_member)
+    db.commit()
+    
+    return group
+
+
+@app.get("/groups/", response_model=List[schemas.GroupRead])
+def get_my_groups(
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user)
+):
+    # Get groups where user is a member
+    member_records = db.query(models.GroupMembers).filter(
+        models.GroupMembers.user_id == user.id
+    ).all()
+    
+    group_ids = [m.group_id for m in member_records]
+    groups = db.query(models.Groups).filter(models.Groups.id.in_(group_ids)).all()
+    return groups
+
+
+@app.post("/groups/{group_id}/members/", response_model=schemas.GroupMemberRead, status_code=status.HTTP_201_CREATED)
+def add_group_member(
+    group_id: str,
+    member_in: schemas.GroupMemberAdd,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user)
+):
+    # Check if current user is a member of the group (any member can add others)
+    member_check = db.query(models.GroupMembers).filter(
+        models.GroupMembers.group_id == group_id,
+        models.GroupMembers.user_id == user.id
+    ).first()
+    
+    if not member_check:
+        raise HTTPException(status_code=403, detail="Only group members can add other members")
+    
+    # Check if user to be added exists
+    user_exists = db.query(models.User).filter(models.User.id == member_in.user_id).first()
+    if not user_exists:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Check if already a member
+    existing = db.query(models.GroupMembers).filter(
+        models.GroupMembers.group_id == group_id,
+        models.GroupMembers.user_id == member_in.user_id
+    ).first()
+    
+    if existing:
+        raise HTTPException(status_code=400, detail="User is already a member")
+    
+    # Add member
+    new_member = models.GroupMembers(
+        group_id=group_id,
+        user_id=member_in.user_id,
+        is_admin=member_in.is_admin
+    )
+    db.add(new_member)
+    db.commit()
+    db.refresh(new_member)
+    return new_member
