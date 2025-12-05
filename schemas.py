@@ -9,11 +9,14 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str
     full_name: str
+    phone: str
 
 class UserOut(BaseModel):
     id: UUID
     email: EmailStr
     full_name: str
+    phone: str
+    is_invited: bool
 
     class Config:
         orm_mode = True
@@ -79,13 +82,12 @@ class GroupRead(BaseModel):
     class Config:
         orm_mode = True
 
-class GroupMemberAdd(BaseModel):
-    user_id: UUID
-    is_admin: bool = False
+class AddMembersToGroups(BaseModel):
+    phone: str
 
-class GroupMemberRead(BaseModel):
+class AddMembersToGroupsRead(BaseModel):
     id: int
-    group_id: UUID
+    group_id: int
     user_id: UUID
     joined_at: datetime
     is_admin: bool
