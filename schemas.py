@@ -1,9 +1,10 @@
 # schemas.py
 from pydantic import BaseModel, EmailStr, Field, ConfigDict
-from typing import Optional, Union
+from typing import Optional, Union, List
 from uuid import UUID
 from decimal import Decimal
 from datetime import datetime, date
+
 
 class UserCreate(BaseModel):
     email: EmailStr
@@ -93,3 +94,26 @@ class AddMembersToGroupsRead(BaseModel):
     is_admin: bool
     
     model_config = ConfigDict(from_attributes=True)
+
+
+class ExpenseSplitIn(BaseModel):
+    user_id: UUID
+    # For exact/percentage split: share amount or percentage or pre-calculated share
+    share: Decimal  # interpret based on split_type
+
+class GroupExpenseBase(BaseModel):
+    total_amount: Decimal
+    description: Optional[str] = None
+    date: date
+    splits: List[ExpenseSplitIn]
+
+class GroupExpenseRead(GroupExpenseBase):
+    id: int
+    added_by: UUID
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        orm_mode = True
+
+

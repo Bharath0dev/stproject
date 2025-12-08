@@ -5,6 +5,7 @@ from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from database import Base
 
+
 class User(Base):
     __tablename__ = "users"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -62,6 +63,8 @@ class Groups(Base):
 
     creator = relationship("User", foreign_keys=[created_by])
     members = relationship("GroupMembers", back_populates="group", cascade="all, delete-orphan")
+    expenses = relationship("GroupExpenses", back_populates="group", cascade="all, delete-orphan")
+
 
 
 class GroupMembers(Base):
@@ -74,4 +77,37 @@ class GroupMembers(Base):
     is_admin = Column(Boolean, nullable=False)
 
     group = relationship("Groups", back_populates="members")
+    user = relationship("User")
+
+
+class GroupExpenses(Base):
+    __tablename__ = "group_expenses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False)  # Fixed: "group.id" -> "groups.id"
+    added_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    total_amount = Column(Numeric(12, 2), nullable=False)
+    description = Column(String, nullable=True)
+    date = Column(Date, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    group = relationship("Groups", back_populates="expenses")
+    added_by_user = relationship("User", foreign_keys=[added_by])
+    splits = relationship("GroupExpenseSplit", back_populates="expense", cascade="all, delete-orphan")
+
+
+class GroupExpenseSplit(Base):
+    __tablename__ = "group_expense_splits"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    group_expense_id = Column(Integer, ForeignKey("group_expenses.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    share_amount = Column(Numeric(12, 2), nullable=False)  # How much this user owes
+    paid_amount = Column(Numeric(12, 2), default=0, nullable=False)  # How much paid so far
+    settled = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    
+    expense = relationship("GroupExpenses", back_populates="splits")
     user = relationship("User")

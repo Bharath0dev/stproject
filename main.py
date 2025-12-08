@@ -13,6 +13,7 @@ from typing import List, Optional
 from datetime import datetime, timedelta, date
 from typing import Dict
 from uuid import UUID
+from decimal import Decimal
 
 app = FastAPI()
 
@@ -350,59 +351,6 @@ def get_my_groups(
     return groups
 
 
-# @app.post("/groups/{group_id}/members/", response_model=schemas.AddMembersToGroupsRead, status_code=status.HTTP_201_CREATED)
-# def add_group_member(
-#     group_id: int,  # Changed from str to int
-#     member_in: schemas.AddMembersToGroups,
-#     db: Session = Depends(get_db),
-#     user: models.User = Depends(get_current_user)
-# ):
-#     # Check if current user is a member of the group (any member can add others)
-#     member_check = db.query(models.GroupMembers).filter(
-#         models.GroupMembers.group_id == group_id,
-#         models.GroupMembers.user_id == user.id
-#     ).first()
-    
-#     if not member_check:
-#         raise HTTPException(status_code=403, detail="Only group members can add other members")
-    
-#     # Check if user to be added exists
-#     user_exists = db.query(models.User).filter(models.User.id == member_in.user_id).first()
-#     if not user_exists:
-#         raise HTTPException(status_code=404, detail="User not found")
-    
-#     # Check if already a member
-#     existing = db.query(models.GroupMembers).filter(
-#         models.GroupMembers.group_id == group_id,
-#         models.GroupMembers.user_id == member_in.user_id
-#     ).first()
-    
-#     if existing:
-#         raise HTTPException(status_code=400, detail="User is already a member")
-    
-#     # Add member
-#     new_member = models.GroupMembers(
-#         group_id=group_id,
-#         user_id=member_in.user_id,
-#         is_admin=member_in.is_admin
-#     )
-#     db.add(new_member)
-#     db.commit()
-#     db.refresh(new_member)
-#     return new_member
-
-
-# @app.post("/groups/{group_id}/add_members", response_model=schemas.AddMembersToGroupsRead, status_code=status.HTTP_201_CREATED)
-# def add_members_to_group(
-#     group_id: UUID,
-#     user_mobile_number: schemas.AddMembersToGroups
-# ):
-#     #check user mobile number in users table
-#     #if user exists add user with user id into this group
-#     #if user does not exists insert a new row in user table with is_invited true, email and full_name are null
-#     #after creation of partial user with is_invited true, add the user to the group
-    
-#     return "done"
 
 @app.post("/groups/{group_id}/add_members", status_code=status.HTTP_201_CREATED)
 def add_members_to_group(
@@ -459,3 +407,109 @@ def add_members_to_group(
 
     return membership
 
+
+
+####################################################################
+
+@app.post("/groups/{group_id}/expenses/", status_code=status.HTTP_201_CREATED)
+def create_group_expense(
+    group_id: int,
+    expense_in: schemas.GroupExpenseBase,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    # 1. Validate group exists
+    group = db.query(models.Groups).filter(models.Groups.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    
+    # 2. Optionally check current_user is member/admin — up to your rules
+    
+    # 3. Create the group_expense record
+    expense = models.GroupExpenses(
+        group_id=group_id,
+        added_by=current_user.id,
+        total_amount=expense_in.total_amount,
+        description=expense_in.description,
+        date=expense_in.date,
+    )
+    db.add(expense)
+    db.flush()  # so expense.id is generated (but not yet committed)
+
+    print("flushed")
+
+    for split_in in expense_in.splits:
+        # optional: validate that user_id is a valid member
+        db.add(models.GroupExpenseSplit(
+            group_expense_id=expense.id,
+            user_id=split_in.user_id,
+            share_amount=split_in.share,
+            paid_amount=Decimal("0"),
+            settled=False
+        ))
+
+    db.commit()
+    # 4. Calculate splits depending on split_type
+    # splits_to_insert = []
+    # if expense_in.split_type == "equal":
+    #     # divide equally among participants
+    #     n = len(expense_in.participants)
+    #     each = (expense_in.total_amount / Decimal(n)).quantize(Decimal("0.01"))
+    #     for p in expense_in.participants:
+    #         splits_to_insert.append(
+    #             models.GroupExpenseSplit(
+    #                 group_expense_id=expense.id,
+    #                 user_id=p.user_id,
+    #                 share_amount=each,
+    #                 paid_amount=Decimal("0"),  # default
+    #                 settled=False
+    #             )
+    #         )
+    # elif expense_in.split_type == "exact":
+    #     # assume expense_in.participants[].share holds exact amounts
+    #     total_of_shares = sum(p.share for p in expense_in.participants)
+    #     if total_of_shares != expense_in.total_amount:
+    #         raise HTTPException(status_code=400, detail="Exact shares do not sum to total_amount")
+    #     for p in expense_in.participants:
+    #         splits_to_insert.append(
+    #             models.GroupExpenseSplit(
+    #                 group_expense_id=expense.id,
+    #                 user_id=p.user_id,
+    #                 share_amount=p.share,
+    #                 paid_amount=Decimal("0"),
+    #                 settled=False
+    #             )
+    #         )
+    
+    # elif expense_in.split_type == "percentage":
+    #     # assume share is percentage (0–100). calculate share_amount accordingly
+    #     total_pct = sum(p.share for p in expense_in.participants)
+    #     if total_pct != Decimal("100"):
+    #         raise HTTPException(status_code=400, detail="Percentages must sum to 100")
+    #     for p in expense_in.participants:
+    #         share_amt = (expense_in.total_amount * p.share / Decimal("100")).quantize(Decimal("0.01"))
+    #         splits_to_insert.append(
+    #             models.GroupExpenseSplit(
+    #                 group_expense_id=expense.id,
+    #                 user_id=p.user_id,
+    #                 share_amount=share_amt,
+    #                 paid_amount=Decimal("0"),
+    #                 settled=False
+    #             )
+    #         )
+    
+    # else:
+    #     raise HTTPException(status_code=400, detail="Invalid split_type")
+    
+    # print("splits_to_insert", splits_to_insert)
+
+    # # 5. Add splits
+    # for s in splits_to_insert:
+    #     db.add(s)
+    
+    # # 6. Commit all
+    # db.commit()
+    # db.refresh(expense)
+    # return {"expense_id": expense.id, "splits": [ {"user_id": s.user_id, "share_amount": s.share_amount} for s in splits_to_insert ]}
+    db.refresh(expense)
+    return expense
